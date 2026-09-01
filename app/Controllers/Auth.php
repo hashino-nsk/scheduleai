@@ -37,15 +37,25 @@ class Auth extends BaseController
         $client->setRedirectUri(env('GOOGLE_REDIRECT_URI')); //.env に記述したURLを読み込む（ログイン成功後の戻り先）
         // アクセストークン設定
         $token = $client->fetchAccessTokenWithAuthCode($code); //認証コードをアクセストークンへ変換
+        // トークン取得失敗
+        if (isset($token['error']))
+        {
+            log_message(
+                'error',
+                'Googleトークン取得失敗: ' . json_encode($token)
+            );
+
+            throw new \RuntimeException('Google認証に失敗しました');
+        }
         $client->setAccessToken($token); //アクセストークン設定
         //OAuthサービス生成
         $oauth = new \Google\Service\Oauth2($client);
         $user_info = $oauth->userinfo->get(); //ユーザー情報取得
         //情報表示
         echo '<h2>Googleログイン成功</h2>';
-        // echo 'Google ID : ' . $user_info->id . '<br>';
-        // echo '名前 : ' . $user_info->name . '<br>';
-        // echo 'メール : ' . $user_info->email . '<br>';
+        echo 'Google ID : ' . $user_info->id . '<br>';
+        echo '名前 : ' . $user_info->name . '<br>';
+        echo 'メール : ' . $user_info->email . '<br>';
 
         // Google ID が一致するユーザーを users テーブルから探す
         $google_sub = $user_info->id;
@@ -54,12 +64,13 @@ class Auth extends BaseController
         if($get_users === false)
         {
             log_message('error', 'DB接続失敗: get_users_google_sub');
-            show_error('エラー', 200, '');
+            throw new \RuntimeException('エラー');
         }
         $google_user_data['google_sub'] = $user_info['id'];
         $google_user_data['name'] = $user_info['name'];
         $google_user_data['email'] = $user_info['email'];
         
+        $google_accounts_model = model(\App\Models\Google_accounts_model::class);
         if ($get_users === null)
         {
             // 初回ログイン：users に登録
@@ -67,7 +78,19 @@ class Auth extends BaseController
             if($user_id === false)
             {
                 log_message('error', 'DB接続失敗: insert_google_user');
-                show_error('エラー', 200, '');
+                throw new \RuntimeException('エラー');
+            }
+
+
+            
+            
+            // 通知設定の登録
+            $notification_settings_model = model(\App\Models\Notification_settings_model::class);
+            $insert_notification_settings_id = $notification_settings_model->insert_notification_settings($user_id);
+            if($insert_notification_settings_id === false)
+            {
+                log_message('error', 'DB接続失敗: insert_notification_settings_id');
+                throw new \RuntimeException('エラー');
             }
             echo '1';
         }
@@ -78,7 +101,7 @@ class Auth extends BaseController
             if($user_id === false)
             {
                 log_message('error', 'DB接続失敗: insert_google_user');
-                show_error('エラー', 200, '');
+                throw new \RuntimeException('エラー');
             }
             echo '2';
         }
@@ -88,47 +111,42 @@ class Auth extends BaseController
         if($login_user === false)
         {
             log_message('error', 'DB接続失敗: get_users_google_sub');
-            show_error('エラー', 200, '');
+            throw new \RuntimeException('エラー');
         }
-            // echo '<pre>';
-            // var_dump($get_users);
-            // echo '</pre>';
+        if ($login_user === null)
+        {
+            log_message('error', 'ユーザー情報が見つかりません');
+            throw new \RuntimeException('エラー');
+        }
+
+        // access_tokenの有効期限を計算
+        $tokenCreated = $token['created'] ?? time();
+        $expiresIn    = $token['expires_in'] ?? 3600;
+        $token_expires_at = date(
+            'Y-m-d H:i:s',
+            $tokenCreated + $expiresIn
+        );
+
+        echo '<pre>';
+        var_dump($token);
+        echo '</pre>';
 
 
+        // 
+        $google_accounts_data['user_id'] = $user_id;
+        $google_accounts_data['google_email'] = $user_info['email'];
+        $google_accounts_data['access_token'] = $token['access_token'];
+        $google_accounts_data['refresh_token'] = $user_info['email'];
+        $google_accounts_data['token_expires_at'] = $token_expires_at;
+        $google_accounts_data['created_at'] = $user_info['email'];
+        $google_accounts_data['updated_at'] = $user_info['email'];
 
-
-
-
-
-        // if (!$user) {
-        //     $db->table('users')->insert([
-        //         'google_sub' => $userInfo->id,
-        //         'name'       => $userInfo->name,
-        //         'email'      => $userInfo->email,
-        //         'created_at' => date('Y-m-d H:i:s'),
-        //         'updated_at' => date('Y-m-d H:i:s'),
-        //     ]);
-
-        //     $userId = $db->insertID();
-
-        //     $db->table('notification_settings')->insert([
-        //         'user_id'    => $userId,
-        //         'notify_time'=> '07:00:00',
-        //         'timezone'   => 'Asia/Tokyo',
-        //         'is_enabled' => 1,
-        //         'created_at' => date('Y-m-d H:i:s'),
-        //         'updated_at' => date('Y-m-d H:i:s'),
-        //     ]);
-        // } else {
-        //     $userId = $user['id'];
-
-        //     $db->table('users')
-        //         ->where('id', $userId)
-        //         ->update([
-        //             'name'       => $userInfo->name,
-        //             'email'      => $userInfo->email,
-        //             'updated_at' => date('Y-m-d H:i:s'),
-        //         ]);
+        // // 初回ログイン：google_accounts に登録
+        // $google_accounts_id = $google_accounts_model->insert_google_accounts($google_accounts_data);
+        // if($google_accounts_id === false)
+        // {
+        //     log_message('error', 'DB接続失敗: insert_google_accounts');
+        //     throw new \RuntimeException('エラー');
         // }
 
         // $db->table('google_accounts')->replace([
