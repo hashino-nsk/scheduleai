@@ -15,8 +15,10 @@ class Auth extends BaseController
         //取得したい情報指定
         $client->addScope('email'); //メールアドレスを取得したい
         $client->addScope('profile'); //名前やアイコンを取得したい
-        //毎回アカウント選択画面が出やすくなります(本番では消す)
-        $client->setPrompt('select_account');
+        // refresh_tokenを取得するために必要
+        $client->setAccessType('offline'); //ユーザーがブラウザを閉じている間でも、システムがGoogle APIを使えるようにする設定
+        // 開発中：同意画面を再表示してrefresh_tokenを発行させる
+        $client->setPrompt('consent select_account'); //ログイン時にアカウント選択画面と利用同意画面が出やすくなります
         //Googleへリダイレクト
         return redirect()->to($client->createAuthUrl()); //$client->createAuthUrl()がリンクを生成
     }
@@ -66,24 +68,46 @@ class Auth extends BaseController
             log_message('error', 'DB接続失敗: get_users_google_sub');
             throw new \RuntimeException('エラー');
         }
+        // usersテーブルへの保存データの生成
         $google_user_data['google_sub'] = $user_info['id'];
         $google_user_data['name'] = $user_info['name'];
         $google_user_data['email'] = $user_info['email'];
-        
+        // access_tokenの有効期限を計算
+        $token_created = $token['created'] ?? time();
+        $expires_in    = $token['expires_in'] ?? 3600;
+        $token_expires_at = date(
+            'Y-m-d H:i:s',
+            $token_created + $expires_in
+        );
+        // refresh_tokenの暗号化
+        $encrypter = \Config\Services::encrypter();
+        $encrypted_refresh_token = base64_encode($encrypter->encrypt($token['refresh_token']));
+        // google_accountsテーブルへの保存データの生成
+        $google_accounts_data['google_email'] = $user_info['email'];
+        $google_accounts_data['access_token'] = $token['access_token'];
+        $google_accounts_data['refresh_token'] = $encrypted_refresh_token;
+        $google_accounts_data['token_expires_at'] = $token_expires_at;
+        $google_accounts_data['created_at'] = $user_info['email'];
+        $google_accounts_data['updated_at'] = $user_info['email'];
         $google_accounts_model = model(\App\Models\Google_accounts_model::class);
+        // 初回ログイン
         if ($get_users === null)
         {
-            // 初回ログイン：users に登録
+            // users に登録
             $user_id = $users_model->insert_google_user($google_user_data);
             if($user_id === false)
             {
                 log_message('error', 'DB接続失敗: insert_google_user');
                 throw new \RuntimeException('エラー');
             }
-
-
-            
-            
+            $google_accounts_data['user_id'] = $user_id;
+            // google_accounts に登録
+            $google_accounts_id = $google_accounts_model->insert_google_accounts($google_accounts_data);
+            if($google_accounts_id === false)
+            {
+                log_message('error', 'DB接続失敗: insert_google_accounts');
+                throw new \RuntimeException('エラー');
+            }
             // 通知設定の登録
             $notification_settings_model = model(\App\Models\Notification_settings_model::class);
             $insert_notification_settings_id = $notification_settings_model->insert_notification_settings($user_id);
@@ -92,18 +116,25 @@ class Auth extends BaseController
                 log_message('error', 'DB接続失敗: insert_notification_settings_id');
                 throw new \RuntimeException('エラー');
             }
-            echo '1';
         }
+        // 2回目以降のログイン
         else
         {
-            // 2回目以降：更新
+            // userテーブル更新
             $user_id = $users_model->update_google_user($google_user_data);
             if($user_id === false)
             {
                 log_message('error', 'DB接続失敗: insert_google_user');
                 throw new \RuntimeException('エラー');
             }
-            echo '2';
+            $google_accounts_data['user_id'] = $user_id;
+            // google_accountsテーブル更新
+            $google_accounts_id = $google_accounts_model->update_google_accounts($google_accounts_data);
+            if($google_accounts_id === false)
+            {
+                log_message('error', 'DB接続失敗: update_google_accounts');
+                throw new \RuntimeException('エラー');
+            }
         }
 
         // 登録・更新後、最新のusers情報を取得
@@ -118,48 +149,6 @@ class Auth extends BaseController
             log_message('error', 'ユーザー情報が見つかりません');
             throw new \RuntimeException('エラー');
         }
-
-        // access_tokenの有効期限を計算
-        $tokenCreated = $token['created'] ?? time();
-        $expiresIn    = $token['expires_in'] ?? 3600;
-        $token_expires_at = date(
-            'Y-m-d H:i:s',
-            $tokenCreated + $expiresIn
-        );
-
-        echo '<pre>';
-        var_dump($token);
-        echo '</pre>';
-
-
-        // 
-        $google_accounts_data['user_id'] = $user_id;
-        $google_accounts_data['google_email'] = $user_info['email'];
-        $google_accounts_data['access_token'] = $token['access_token'];
-        $google_accounts_data['refresh_token'] = $user_info['email'];
-        $google_accounts_data['token_expires_at'] = $token_expires_at;
-        $google_accounts_data['created_at'] = $user_info['email'];
-        $google_accounts_data['updated_at'] = $user_info['email'];
-
-        // // 初回ログイン：google_accounts に登録
-        // $google_accounts_id = $google_accounts_model->insert_google_accounts($google_accounts_data);
-        // if($google_accounts_id === false)
-        // {
-        //     log_message('error', 'DB接続失敗: insert_google_accounts');
-        //     throw new \RuntimeException('エラー');
-        // }
-
-        // $db->table('google_accounts')->replace([
-        //     'user_id'          => $userId,
-        //     'google_email'     => $userInfo->email,
-        //     'access_token'     => json_encode($token, JSON_UNESCAPED_UNICODE),
-        //     'refresh_token'    => $token['refresh_token'] ?? null,
-        //     'token_expires_at' => isset($token['expires_in'])
-        //         ? date('Y-m-d H:i:s', time() + $token['expires_in'])
-        //         : null,
-        //     'created_at'       => date('Y-m-d H:i:s'),
-        //     'updated_at'       => date('Y-m-d H:i:s'),
-        // ]);
 
         // session()->set([
         //     'user_id' => $userId,
